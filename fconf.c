@@ -172,21 +172,23 @@ static int fc_parse_good_line(struct fc_result *fcr, char *line, int size) {
     printf("%d:%d:%s\n", cnt++, size, line);
 }
 
-static int fc_full_parse(struct fc_result *fcr)
-{
+static int fc_line_parse(struct fc_result *fcr) {
     char ch;
     char last_blck_ch = 0;
     char buf[(FC_MAX_ATTR_VALUE_LEN + FC_MAX_ATTR_LEN) * 2]; /* for template saving string */
+    char bufsave[(FC_MAX_ATTR_VALUE_LEN + FC_MAX_ATTR_LEN) * 2]; /* for template saving string */
+    int save_line_cnt = 1;
+    int save_cnt = 0;
+    int save_pos_err;
     int cnt = 0;
+    int line_cnt = 1;
     char block[32];
     FILE *fp = _FCR_FILE(fcr);
     int nrd;
-    bool was_double_bslash = false;
     bool was_bslash = false;
-    int bslash_cnt = 0;
     bool last_bslash = false;
     bool last_double_bslash = false;
-    bool was_line_bslash = false;
+    bool line_error = false;
 
     while(1) {
         
@@ -201,28 +203,42 @@ static int fc_full_parse(struct fc_result *fcr)
         }
 
         for (int i = 0; i < nrd; i++) {
+            /* save real line */
+            bufsave[save_cnt++] = block[i];
 
             if (block[i] != '\\') {
-                if (was_bslash)
-                    was_line_bslash = true;
 
-                if (last_bslash)
+                if (last_bslash) {
+                    if (block[i] != '\n') {
+                        line_error = true;
+                        save_pos_err = save_cnt;
+                    }
                     last_bslash = false;
+                }
 
                 if (block[i] == '\n') {
-                    if (was_bslash || was_line_bslash) {
+                    bufsave[save_cnt - 1] = 0;
+                    save_cnt = 0;
+
+                    if (was_bslash) {
                         was_bslash = false;
-                        was_line_bslash = false;
                         continue;
                     } else {
                         buf[cnt++] = 0; /* end of string */
-                        fc_parse_good_line(fcr, buf, cnt); /* we found the whole line */
-                        cnt = 0;
+
+                        if (line_error) {
+                            FCTRACE("error parsing line:%d, pos:%d, symb:'\\', line:\"%s\"\n", line_cnt, save_pos_err, bufsave);
+                            line_error = false;
+                            return -1;
+                        } else {
+                            fc_parse_good_line(fcr, buf, cnt); /* we found the whole line */
+                            cnt = 0;
+                            line_cnt++;
+                        }
                     }
                 } else {
                     buf[cnt++] = block[i];
                     was_bslash = false;
-                    was_line_bslash = false;
                 }
             } else {
                 if (last_bslash) {
@@ -253,6 +269,10 @@ static int fc_full_parse(struct fc_result *fcr)
     }
 
     return 0;
+}
+static int fc_full_parse(struct fc_result *fcr)
+{
+    return fc_line_parse(fcr);
 }
 
 struct fc_result *fconf_read(const char *file)
