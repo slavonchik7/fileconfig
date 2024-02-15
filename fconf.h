@@ -10,9 +10,21 @@
 #define FC_MAX_ATTR_VALUE_LEN   512
 #define FC_MAX_ATTR_LEN         128
 
+struct fc_attr {
+    char attr[FC_MAX_ATTR_LEN];
+    int alen;
+
+    char value[FC_MAX_ATTR_VALUE_LEN];
+    int vlen;
+
+/* for internal work, dont touch!! */
+    void *__prvt;
+};
+
 struct fc_result {
-#define FCONF_OK    0x00
-#define FCONF_ERR   0x01
+#define FCONF_OK        0x00
+#define FCONF_ERR       0x01
+#define FCONF_EPARSE    0x02
     int status;
 
 /* string msg about last error */
