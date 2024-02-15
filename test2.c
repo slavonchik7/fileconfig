@@ -7,7 +7,7 @@
 
 int main(int argc, char **argv)
 {
-    struct fc_result *fcr = fconf_read("fconf.h");
+    struct fc_result *fcr = fconf_read("test.txt");
     if (!fcr) {
         printf("fatal alloc\n");
         exit(1);
@@ -15,6 +15,7 @@ int main(int argc, char **argv)
     
     if (FCISERR(fcr)) {
         printf(fcr->errmsg);
+        printf("status:%d\n", fcr->status);
         fconf_clear(fcr);
         exit(1);
     }
