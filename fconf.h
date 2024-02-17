@@ -4,17 +4,37 @@
 
 
 
-
 #define __user_api
 
-#define FC_MAX_ATTR_VALUE_LEN   512
-#define FC_MAX_ATTR_LEN         128
+
+#ifndef FC_MAX_ATTR_VALUE_SIZE
+#   define FC_MAX_ATTR_VALUE_SIZE   128
+#endif
+
+#ifndef FC_MAX_ATTR_SIZE
+#   define FC_MAX_ATTR_SIZE         32
+#endif
+
+
+struct fc_sarray {
+    struct fc_string *arr;
+    int size;
+};
+
+struct fc_string {
+    char *s;
+    int len;
+};
+
+#define FC_SARRAY_INIT ((struct fc_sarray){0,0})
+#define FC_STRING_INIT ((struct fc_string){0,0})
+
 
 struct fc_attr {
-    char attr[FC_MAX_ATTR_LEN];
+    char attr[FC_MAX_ATTR_SIZE];
     int alen;
 
-    char value[FC_MAX_ATTR_VALUE_LEN];
+    char value[FC_MAX_ATTR_VALUE_SIZE];
     int vlen;
 
 /* for internal work, dont touch!! */
@@ -25,6 +45,7 @@ struct fc_result {
 #define FCONF_OK        0x00
 #define FCONF_ERR       0x01
 #define FCONF_EPARSE    0x02
+#define FCONF_ELONGATTR 0x03
     int status;
 
 /* string msg about last error */
