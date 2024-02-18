@@ -11,10 +11,13 @@
 #endif
 
 #ifndef FC_MAX_RAW_LINE_SIZE
-#   define FC_MAX_RAW_LINE_SIZE ((FC_MAX_ATTR_VALUE_SIZE + FC_MAX_ATTR_SIZE) * 2) 
+#   define FC_MAX_RAW_LINE_SIZE ((FC_MAX_ATTR_VALUE_SIZE + FC_MAX_ATTR_SIZE + 1)) 
 #endif
 
+#define FC_MAX_FLAGS_VAL (FCONF_FSTATIC | FCONF_FALLOC)
+
 #define FCDEBUG 1
+
 
 #if FCDEBUG
 #   define FCTRACE(...) \
@@ -153,15 +156,29 @@ struct fc_private {
 };
 typedef struct fc_private fcprvt_t;
 
+#define free_sarray(fcsa) \
+do { \
+    if (fcsa) { \
+        int __siz = ((struct fc_sarray*)fcsa)->size; \
+        while(__siz) { \
+            --__siz; \
+            free(((struct fc_sarray*)fcsa)->arr[__siz].s); \
+        } \
+        free(((struct fc_sarray*)fcsa)->arr); \
+    } \
+} while (0)
+
+
 /* defines for fast and comfortable access to fields */
 #define _FCR_FILE(fcr) (((fcprvt_t*)((fcr)->__prvt))->fp)
 #define _FCR_FNAME(fcr) (((fcprvt_t*)((fcr)->__prvt))->fname)
 #define _FCR_LLISTP(fcr) (&(((fcprvt_t*)((fcr)->__prvt))->line_list))
 #define _FCR_LINECNT(fcr) (((fcprvt_t*)((fcr)->__prvt))->linecnt)
 
-
+static void fc_free_attrl(attrld_t *al);
 static char *get_first_word(char *buf, unsigned int size, unsigned int *wsize);
 static char *run_through_text(char *txt, unsigned int txtsize, unsigned int *wsize, unsigned int *_offset);
+static int get_word_count(char *str, unsigned int size);
 static inline void msgerror_free(void *ptr);
 static char *msgerrors(int errcode, int *size);
 static inline char *msgerror(int errcode);
@@ -172,13 +189,21 @@ static void fc_form_error(fcr_t *fcr, int errcode, const char *format, ...);
 static void fc_form_sys_error(fcr_t *fcr, const char *format, ...);
 static inline int fc_close(fcr_t *fcr);
 static FILE *fc_open(fcr_t *fcr, const char *fpath);
-static void fc_clear_raw_line_list(struct fc_result *fcr);
-static int fc_parse_good_line(struct fc_result *fcr, char *line, int size);
+static void fc_clear_line_list(struct fc_result *fcr);
 static attrld_t *fc_add_line(struct fc_result *fcr, char *line, int size);
 static int fc_line_parse(struct fc_result *fcr);
 static int fc_full_parse(struct fc_result *fcr);
 struct fc_result *fconf_read(const char *file);
 void fconf_clear(struct fc_result *fcr);
+static struct fc_string *fc_str_for_user(attrld_t *al, char flags);
+static struct fc_sarray *fc_arr_for_user(attrld_t *al, char flags);
+static void *_fc_attr_sa(struct fc_result *fcr, char *attr, char flags, char what);
+struct fc_string *fconf_attr_string(struct fc_result *fcr, char *attr, char flags);
+struct fc_sarray *fconf_attr_sarray(struct fc_result *fcr, char *attr, char flags);
+static inline struct fc_string *fc_alloc_string_zero(struct fc_string *fcs, int len /* without '\0' */);
+static struct fc_string *fc_alloc_string(struct fc_string *fcs, int len /* without '\0' */, char *init);
+static struct fc_sarray *fc_alloc_sarray(struct fc_sarray *fcsa, int size);
+
 
 
 /* save first word in string */
@@ -238,9 +263,20 @@ static char *run_through_text(char *txt, unsigned int txtsize, unsigned int *wsi
     w = get_first_word(txt + offset, txtsize - offset, wsize);
     
     if (w)
-        offset = w - txt + *wsize; /* offset to the beginning of the current word */
+        *_offset = w - txt + *wsize; /* offset to the beginning of the current word */
 
     return w;
+}
+
+static int get_word_count(char *str, unsigned int size)
+{
+    int count = 0;
+    unsigned int offset = 0, wsize = 0;
+
+    while(run_through_text(str, size, &wsize, &offset))
+        count++;
+
+    return count;
 }
 
 /* clear allocated error's buffer */
@@ -364,7 +400,7 @@ static FILE *fc_open(fcr_t *fcr, const char *fpath)
     return fp;
 }
 
-static char *fc_alloc_string(struct fc_string *fcs, int len /* without '\0' */, char *init)
+static struct fc_string *fc_alloc_string(struct fc_string *fcs, int len /* without '\0' */, char *init)
 {
     fcs->s = (char *)malloc(len + 1);
     if (!fcs->s)
@@ -372,24 +408,23 @@ static char *fc_alloc_string(struct fc_string *fcs, int len /* without '\0' */, 
 
     if (init)
         memcpy(fcs->s, init, len + 1);
-    else
-        memset(fcs->s, 0, len + 1);
 
     fcs->len = len;
+    fcs->s[len] = 0;
     
-    return fcs->s;
+    return fcs;
 }
 
-static inline char *fc_alloc_string_zero(struct fc_string *fcs, int len /* without '\0' */)
+static inline struct fc_string *fc_alloc_string_zero(struct fc_string *fcs, int len /* without '\0' */)
 {
     return fc_alloc_string(fcs, len, NULL);
 }
 
-static int fc_alloc_sarray(struct fc_sarray *fcsa, int size)
+static struct fc_sarray *fc_alloc_sarray(struct fc_sarray *fcsa, int size)
 {
     fcsa->arr = (struct fc_string *)malloc(size * sizeof(struct fc_string));
     if (!fcsa->arr)
-        return -1;
+        return NULL;
     
     fcsa->size = size;
     
@@ -398,13 +433,25 @@ static int fc_alloc_sarray(struct fc_sarray *fcsa, int size)
         fcsa->arr[size] = FC_STRING_INIT;
     }
 
-    return 0;
+    return fcsa;
 }
 
-static void fc_clear_raw_line_list(struct fc_result *fcr)
+static void fc_free_attrl(attrld_t *al)
+{
+    if (al->str.s)
+        free(al->str.s);
+    al->str.s = 0;
+
+    free_sarray(&al->sarr);
+    al->sarr.arr = 0;
+
+    free(al);
+}
+
+static void fc_clear_line_list(struct fc_result *fcr)
 {
     if (!list_empty(_FCR_LLISTP(fcr)))
-        list_free_items(_FCR_LLISTP(fcr), attrld_t, list, free);
+        list_free_items(_FCR_LLISTP(fcr), attrld_t, list, fc_free_attrl);
 
     INIT_LIST_HEAD(_FCR_LLISTP(fcr));
 }
@@ -414,37 +461,35 @@ static attrld_t *fc_add_line(struct fc_result *fcr, char *line, int size)
     attrld_t *rl;
     char *s;
     unsigned int asize;
-    unsigned int vsize;
-
+    
     s = get_first_word(line, size, &asize);
-    //FCTRACE("first:%s\n", s);
-
-    if (asize + 1 > FC_MAX_ATTR_SIZE) {
+    asize++;
+  //  FCTRACE("first getted\n");
+    if (asize > FC_MAX_ATTR_SIZE) {
         fc_form_error(fcr, FCONF_ELONGATTR, "long attr name, should be less than %d\n", FC_MAX_ATTR_SIZE - 1);
         return NULL;
     }
-
+//FCTRACE("try alloc\n");
     rl = (attrld_t*)malloc(sizeof(*rl));
     if (!rl) {
         fc_form_sys_error(fcr, "can not alloc memory\n");
         return NULL;
     }
 
+//FCTRACE("try attr\n");
     /* copy attribute */
     rl->asize = asize;
     memcpy(rl->attr, s, asize);
-    rl->attr[asize] = 0;
-
-    //FCTRACE("copy success:%s\n", rl->attr);
+    rl->attr[asize - 1] = 0;
 
     /* copy value */
-    s += asize + 1; /* value pointer */
-    rl->vsize = (size - (int)(s - line)); /* get value size */
-    //FCTRACE("vsize:%d, vstr:%s\n", rl->vsize, s);
-    //s[rl->vsize] = 0;
-    
+    s += asize; /* value pointer */
+//FCTRACE("try value:%d|%d\n", asize, (size - (s - line)));
+    rl->vsize = (size - (s - line)); /* get value size */
     memcpy(rl->value, s, rl->vsize);
+    s[rl->vsize - 1] = 0;
 
+//FCTRACE("try exit\n");
     rl->sarr = FC_SARRAY_INIT;
     rl->str = FC_STRING_INIT;
 
@@ -453,17 +498,68 @@ static attrld_t *fc_add_line(struct fc_result *fcr, char *line, int size)
 
     _FCR_LINECNT(fcr)++;
 
-    //fc_parse_good_line(fcr, line, size); /* we found the whole line */
-    static int cnt = 0;
-    FCTRACE("%d:%s:%s\n", cnt++, rl->attr, rl->value);
     return rl;
 }
 
-static int fc_parse_good_line(struct fc_result *fcr, char *line, int size) 
+static struct fc_string *fc_str_for_user(attrld_t *al, char flags)
 {
-    static int cnt = 0;
-    printf("%d:%d:%s\n", cnt++, size, line);
-    return 0;
+    if (flags & FCONF_FSTATIC) {
+        if (al->str.s) /* if already was called */
+            free(al->str.s);
+
+        return fc_alloc_string(&al->str, al->vsize-1, al->value);
+    } else {
+        struct fc_string *fcs = (struct fc_string *)malloc(sizeof(*fcs));
+        if (!fcs)
+            return NULL;
+
+        if (!fc_alloc_string(fcs, al->vsize-1, al->value)) {
+            free(fcs);
+            return NULL;
+        }
+
+        return fcs;
+    }
+}
+
+static struct fc_sarray *fc_arr_for_user(attrld_t *al, char flags)
+{
+    struct fc_sarray *fcsa;
+    unsigned int size = (unsigned int)get_word_count(al->value, al->vsize);
+    char *word;
+    printf("worfds:%d\n", 1);
+
+    if (flags & FCONF_FALLOC) {
+        fcsa = (struct fc_sarray *)malloc(sizeof(*fcsa));
+        if (!fcsa)
+            return NULL;
+
+        if (!fc_alloc_sarray(fcsa, size)) {
+            free(fcsa);
+            return NULL;
+        }
+    } else {
+        fcsa = &al->sarr;
+        free_sarray(fcsa); /* if already was called */
+        if (!fc_alloc_sarray(fcsa, size))
+            return NULL;
+    }
+    
+    for (unsigned int offset = 0, idx = 0;
+        (word = run_through_text(al->value, al->vsize, &size, &offset));
+        idx++) {
+        if (!fc_alloc_string(&fcsa->arr[idx], size, word)) {
+            while(idx) {
+                --idx;
+                free(&fcsa->arr[idx].s);
+            }
+            if (flags & FCONF_FALLOC)
+                free(fcsa);
+            return NULL; /* NOW WITHOUT LAST ALLOC FREEING */
+        }
+    }
+
+    return fcsa;
 }
 
 /* the primary viewing of the file
@@ -476,12 +572,13 @@ static int fc_parse_good_line(struct fc_result *fcr, char *line, int size)
 static int fc_line_parse(struct fc_result *fcr) 
 {
     char buf[FC_MAX_RAW_LINE_SIZE]; /* for template saving string */
-    char bufsave[FC_MAX_RAW_LINE_SIZE]; /* for error indicate string */
+    char bufsave[512]; /* for error indicate string */
+    int save_line_cnt = 1;
     int save_cnt = 0;
     int save_pos_err;
     int cnt = 0;
     int line_cnt = 1;
-    char block[512];
+    char block[4096];
     int nrd;
     bool was_bslash = false;
     bool last_bslash = false;
@@ -492,7 +589,7 @@ static int fc_line_parse(struct fc_result *fcr)
 
     while(1) {
         nrd = fread(block, 1, sizeof(block), fp);
-        FCTRACE("nrd:%d\n", nrd);
+        //FCTRACE("nrd:%d\n", nrd);
         
         if (nrd < sizeof(block) && ferror(fp)) {
             FCTRACE("err fread\n");
@@ -501,6 +598,13 @@ static int fc_line_parse(struct fc_result *fcr)
         }
 
         for (int i = 0; i < nrd; i++) {
+            
+            if (cnt == sizeof(buf)) { /* if line very long */
+                fc_form_error(fcr, FCONF_EPARSE, "error very long line:%d, line:\"%s\"\n", save_line_cnt, bufsave);
+                fc_clear_line_list(fcr); /* full clear line list */
+                return -1;
+            }
+
             /* save real line */
             bufsave[save_cnt++] = block[i];
 
@@ -516,6 +620,7 @@ static int fc_line_parse(struct fc_result *fcr)
 
                 if (block[i] == '\n') {
                     bufsave[save_cnt - 1] = 0;
+                    save_line_cnt++;
                     save_cnt = 0;
 
                     if (was_bslash) {
@@ -523,16 +628,16 @@ static int fc_line_parse(struct fc_result *fcr)
                         continue;
                     } else {
                         buf[cnt++] = 0; /* end of string */
-
+                        //FCTRACE("fc_add_line:%d:%s\n",line_cnt, bufsave);
                         if (line_error) {
-                            FCTRACE("error parsing line:%d, pos:%d, symb:'\\', line:\"%s\"\n", line_cnt, save_pos_err, bufsave);
-                            fc_form_error(fcr, FCONF_EPARSE, "error parsing line:%d, pos:%d, symb:'\\', line:\"%s\"\n", line_cnt, save_pos_err, bufsave);
+                            FCTRACE("error parsing line:%d, pos:%d, symb:'\\', line:\"%s\"\n", save_line_cnt, save_pos_err, bufsave);
+                            fc_form_error(fcr, FCONF_EPARSE, "error parsing line:%d, pos:%d, symb:'\\', line:\"%s\"\n", save_line_cnt, save_pos_err, bufsave);
                             line_error = false;
                             return -1;
                         } else {
                             if (line_not_empty) {
                                 if (!fc_add_line(fcr, buf, cnt)) {
-                                    fc_clear_raw_line_list(fcr); /* full clear line list */
+                                    fc_clear_line_list(fcr); /* full clear line list */
                                     return -1;
                                 }
                             }
@@ -542,7 +647,7 @@ static int fc_line_parse(struct fc_result *fcr)
                         }
                     }
                 } else {
-                    if (block[i] != ' ')
+                    if (block[i] != ' ' && block[i] != '\t')
                         line_not_empty = true;
                     buf[cnt++] = block[i];
                     was_bslash = false;
@@ -569,7 +674,7 @@ static int fc_line_parse(struct fc_result *fcr)
             if (cnt != 0) {
                 buf[cnt++] = 0; /* end of file and also string */
                 if (!fc_add_line(fcr, buf, cnt)) {
-                    fc_clear_raw_line_list(fcr); /* full clear line list */
+                    fc_clear_line_list(fcr); /* full clear line list */
                     return -1;
                 }
             }
@@ -582,30 +687,13 @@ static int fc_line_parse(struct fc_result *fcr)
 
 static int fc_full_parse(struct fc_result *fcr)
 {
-    fcprvt_t *pvt = (fcprvt_t *)fcr->__prvt;
-    attrld_t *pos;
+    //fcprvt_t *pvt = (fcprvt_t *)fcr->__prvt;
+    //attrld_t *pos;
 
     if (fc_line_parse(fcr) < 0)
         return -1;
 
     return 0;
-#if 0
-    list_for_each_entry(pos, &pvt->line_list, list) {
-        pos->uattr = (typeof(*pos->uattr)*)malloc(sizeof(*(pos->uattr)));
-        if (!pos->uattr)
-            goto err_out;
-        
-        pos->uattr->
-    }
-
-    return 0;
-
-err_out:
-    list_for_each_entry(pos, &pvt->line_list, list) {
-        if(pos->uattr)
-            free(pos->uattr);
-    }
-#endif
 }
 
 struct fc_result *fconf_read(const char *file)
@@ -643,14 +731,11 @@ struct fc_result *fconf_read(const char *file)
     
     fcr->__prvt = (void *)fcp;
 
-    FCTRACE("start parse\n");
     if (fc_full_parse(fcr) < 0) {
         fc_close(fcr);
         return fcr;
     }
 
-    FCTRACE("end parse\n");
-    /* template for debug */
     fc_close(fcr);
 
     return fcr;
@@ -661,7 +746,71 @@ void fconf_clear(struct fc_result *fcr)
     if (fcr->errmsg)
         free(fcr->errmsg);
 
-    fc_clear_raw_line_list(fcr);
+    fc_clear_line_list(fcr);
 
     free(fcr);
+}
+
+attrld_t *fc_find_match(struct fc_result *fcr, char *attr)
+{
+    attrld_t *pos;
+    int len = strlen(attr);
+
+    list_for_each_entry(pos, _FCR_LLISTP(fcr), list)
+        if ((pos->asize - 1) == len)
+            if (!memcmp(attr, pos->attr, len))
+                return pos;
+
+    return NULL;
+}
+
+#define _WHAT_STRING 0x00
+#define _WHAT_SARRAY 0x01
+static void *_fc_attr_sa(struct fc_result *fcr, char *attr, char flags, char what)
+{
+    attrld_t *match;
+    void *ret;
+
+    if (flags > FC_MAX_FLAGS_VAL) {
+        fc_form_error(fcr, FCONF_EBADFLAGS, "there are to many flags\n");
+        return NULL;
+    }
+
+    if (!(match = fc_find_match(fcr, attr))) {
+        fc_form_error(fcr, FCONF_ENOMATCH, "Can not find attr\n");
+        return NULL;
+    }
+
+    ret = (what == _WHAT_STRING) 
+            ? (void *)fc_str_for_user(match, flags) 
+            : (void *)fc_arr_for_user(match, flags);
+    if (!ret) {
+        fc_form_sys_error(fcr, "Can not alloc memory\n");
+        return NULL;
+    }
+    
+    return ret;
+}
+
+struct fc_string *fconf_attr_string(struct fc_result *fcr, char *attr, char flags)
+{
+    return (struct fc_string *)_fc_attr_sa(fcr, attr, flags, _WHAT_STRING);
+}
+
+struct fc_sarray *fconf_attr_sarray(struct fc_result *fcr, char *attr, char flags)
+{
+    return (struct fc_sarray *)_fc_attr_sa(fcr, attr, flags, _WHAT_SARRAY);
+}
+
+void fc_string_free(struct fc_string *fcs)
+{
+    if (fcs->s)
+        free(fcs->s);
+    free(fcs);
+}
+
+void fc_sarray_free(struct fc_sarray *fcsa)
+{
+    free_sarray(fcsa);
+    free(fcsa);
 }
